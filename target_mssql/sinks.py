@@ -113,24 +113,23 @@ class mssqlSink(SQLSink):
         if isinstance(insert_sql, str):
             insert_sql = sqlalchemy.text(insert_sql)
 
-        self.logger.info("Inserting with SQL: %s", insert_sql)
+        self.logger.info(f"Inserting {len(records)} records with SQL: {insert_sql}")
 
-        columns = self.column_representation(schema)
+        conformed_records = [self.conform_record(record) for record in records]
+        property_names = list(self.conform_schema(schema)["properties"].keys())
 
-        # temporary fix to ensure missing properties are added
-        insert_records = []
-        for record in records:
-            insert_record = {}
-            for column in columns:
-                insert_record[column.name] = record.get(column.name)
-            insert_records.append(insert_record)
+        # Create new record dicts with missing properties filled in with None
+        new_records = [
+            {name: record.get(name) for name in property_names}
+            for record in conformed_records
+        ]
 
-        self.connection.execute(insert_sql, insert_records)
+        # self.connection.execute(insert_sql, insert_records)
+        with self.connector._connect() as conn, conn.begin():  # noqa: SLF001
+            result = conn.execute(insert_sql, new_records)
 
-        if isinstance(records, list):
-            return len(records)  # If list, we can quickly return record count.
-
-        return None  # Unknown record count.
+        return result.rowcount
+        
 
     def column_representation(
         self,
@@ -165,49 +164,13 @@ class mssqlSink(SQLSink):
         join_keys = [self.conform_name(key, "column") for key in self.key_properties]
         schema = self.conform_schema(self.schema)
 
-        if self.key_properties:
-            self.logger.info(f"Preparing table {self.full_table_name}")
-            self.connector.prepare_table(
-                full_table_name=self.full_table_name,
-                schema=schema,
-                primary_keys=join_keys,
-                as_temp_table=False,
-            )
-            # Create a temp table (Creates from the table above)
-            self.logger.info(f"Creating temp table {self.full_table_name}")
-            self.connector.create_temp_table_from_table(
-                from_table_name=self.full_table_name
-            )
-
-            db_name, schema_name, table_name = self.parse_full_table_name(
-                self.full_table_name
-            )
-            tmp_table_name = (
-                f"{schema_name}.#{table_name}" if schema_name else f"#{table_name}"
-            )
-            # Insert into temp table
-            self.bulk_insert_records(
-                full_table_name=tmp_table_name,
-                schema=schema,
-                records=conformed_records,
-                is_temp_table=True,
-            )
-            # Merge data from Temp table to main table
-            self.logger.info(f"Merging data from temp table to {self.full_table_name}")
-            self.merge_upsert_from_table(
-                from_table_name=tmp_table_name,
-                to_table_name=self.full_table_name,
-                schema=schema,
-                join_keys=join_keys,
-            )
-
-        else:
-            self.bulk_insert_records(
+        self.bulk_insert_records(
                 full_table_name=self.full_table_name,
                 schema=schema,
                 records=conformed_records,
             )
 
+       
     def merge_upsert_from_table(
         self,
         from_table_name: str,

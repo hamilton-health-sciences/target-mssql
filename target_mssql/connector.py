@@ -6,7 +6,7 @@ import sqlalchemy
 from singer_sdk.connectors.sql import SQLConnector
 from singer_sdk.helpers._typing import get_datelike_property_type
 from sqlalchemy.dialects import mssql
-
+from sqlalchemy import text
 
 class mssqlConnector(SQLConnector):
     """The connector for mssql.
@@ -19,6 +19,17 @@ class mssqlConnector(SQLConnector):
     allow_column_alter: bool = True  # Whether altering column types is supported.
     allow_merge_upsert: bool = True  # Whether MERGE UPSERT is supported.
     allow_temp_tables: bool = True  # Whether temp tables are supported.
+
+    def create_engine(self) -> sqlalchemy.engine.Engine:
+        """Create the SQLAlchemy engine with pyodbc and fast_executemany."""
+        sqlalchemy_url = self.get_sqlalchemy_url(self.config)
+        engine = sqlalchemy.create_engine(
+            sqlalchemy_url,
+            fast_executemany=True,
+        )
+        self.logger.info(f"{engine.url=}")
+        return engine
+    
 
     def create_table_with_records(
         self,
@@ -54,24 +65,32 @@ class mssqlConnector(SQLConnector):
         )
 
     def get_sqlalchemy_url(self, config: dict) -> str:
-        """Generates a SQLAlchemy URL for mssql.
+        """Generates a SQLAlchemy URL for mssql using pyodbc.
 
         Args:
             config: The configuration for the connector.
         """
-
         if config.get("sqlalchemy_url"):
             return config["sqlalchemy_url"]
 
+        driver = config.get("odbc_driver", "ODBC Driver 18 for SQL Server")
+
         connection_url = sqlalchemy.engine.url.URL.create(
-            drivername="mssql+pymssql",
+            drivername="mssql+pyodbc",
             username=config["username"],
             password=config["password"],
             host=config["host"],
             port=config["port"],
             database=config["database"],
+            query={
+                "driver": driver,
+                "TrustServerCertificate": "yes"
+            },
         )
-        return str(connection_url)
+        
+        connection_string = str(connection_url).replace("***", config['password'])
+        
+        return connection_string
 
     def create_empty_table(
         self,
@@ -247,8 +266,10 @@ class mssqlConnector(SQLConnector):
             )
         try:
             self.connection.execute(
-                f"""ALTER TABLE { str(full_table_name) }
-                ALTER COLUMN { str(column_name) } { str(compatible_sql_type) }"""
+                sqlalchemy.DDL(
+                    f"""ALTER TABLE { str(full_table_name) }
+                    ALTER COLUMN { str(column_name) } { str(compatible_sql_type) }"""
+                )
             )
         except Exception as e:
             raise RuntimeError(
@@ -293,8 +314,10 @@ class mssqlConnector(SQLConnector):
 
         try:
             self.connection.execute(
-                f"""ALTER TABLE { str(full_table_name) }
-                ADD { str(create_column_clause) } """
+                text(
+                    f"""ALTER TABLE { str(full_table_name) }
+                    ADD { str(create_column_clause) } """
+                )
             )
 
         except Exception as e:
@@ -385,13 +408,13 @@ class mssqlConnector(SQLConnector):
             f"{schema_name}.#{table_name}" if schema_name else f"#{table_name}"
         )
 
-        droptable = f"DROP TABLE IF EXISTS {tmp_full_table_name}"
+        droptable = text(f"DROP TABLE IF EXISTS {tmp_full_table_name}")
         self.connection.execute(droptable)
 
-        ddl = f"""
+        ddl = text(f"""
             SELECT TOP 0 *
             into {tmp_full_table_name}
             FROM {full_table_name}
-        """  # nosec
+        """)  # nosec
 
         self.connection.execute(ddl)
